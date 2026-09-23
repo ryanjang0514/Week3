@@ -1,0 +1,731 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Interactive Type: Oildrop on the water</title>
+
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      background: #f70000;
+    }
+
+    .title {
+      margin: 40px 0 40px 40px;
+      font-size: 36px;
+      color: #fff;
+    }
+
+    .drawing {
+      position: relative;
+      width: 60%;
+      height: 65vh;
+      min-height: 420px;
+      margin-left: 40px;
+      overflow: hidden;
+      background: #000;
+    }
+
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: manipulation;
+    }
+
+    /* Keep a real input for IME composition and mobile keyboards. */
+    #words {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      border: 0;
+      opacity: 0;
+      pointer-events: none;
+      caret-color: transparent;
+      font-size: 16px;
+    }
+
+    .text {
+      width: 60%;
+      margin: 40px 0 40px 40px;
+      font-size: 24px;
+      line-height: 1.5;
+      color: #fff;
+    }
+
+    @media (max-width: 700px) {
+      .title {
+        margin: 24px;
+        font-size: 28px;
+      }
+
+      .drawing {
+        width: calc(100% - 48px);
+        margin-left: 24px;
+        min-height: 360px;
+      }
+
+      .text {
+        width: auto;
+        margin: 24px;
+        font-size: 20px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <h1 class="title">Interactive Type: Oildrop on the water</h1>
+
+  <div class="drawing">
+    <canvas
+      id="surface"
+      aria-label="Interactive artwork with letters spreading like oil"
+    ></canvas>
+
+    <input
+      id="words"
+      type="text"
+      aria-label="Type words for the artwork"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      maxlength="100"
+    >
+  </div>
+
+  <p class="text">
+    Typed words behave like a drop of oil on water.
+    <br>
+   Each new word pushes the others away and creates ripples.
+    <br>
+    Over time, the letters stretch, blur, and fade, becoming unreadable traces.
+    <br>
+    I initially planned to make letters themselves look like oil on the water, but the prototype shows both words and bubbles seperately. 
+  </p>
+
+  <script>
+    const canvas = document.querySelector("#surface");
+    const ctx = canvas.getContext("2d");
+    const input = document.querySelector("#words");
+    const area = document.querySelector(".drawing");
+
+    // Adjustable settings
+    const LIFE = 24;
+    const MAX_WORDS = 24;
+    const FONT_SIZE = 112;
+    const TAU = Math.PI * 2;
+
+    const reduceMotion = window.matchMedia(
+      "(prefers-reduced-motion: reduce)"
+    ).matches;
+
+    const SPEED = reduceMotion ? 0.35 : 0.85;
+
+    const clamp = (value, min, max) =>
+      Math.max(min, Math.min(max, value));
+
+    const segmenter = typeof Intl.Segmenter === "function"
+      ? new Intl.Segmenter(undefined, { granularity: "grapheme" })
+      : null;
+
+    function letters(text) {
+      return segmenter
+        ? [...segmenter.segment(text)].map(part => part.segment)
+        : Array.from(text);
+    }
+
+    let width = 1;
+    let height = 1;
+    let dpr = 1;
+    let time = 0;
+    let previous = 0;
+    let count = 0;
+
+    let words = [];
+    let waves = [];
+    let active = null;
+    let target = null;
+    let composing = false;
+
+    function resize() {
+      const oldWidth = width;
+      const oldHeight = height;
+      const rect = area.getBoundingClientRect();
+
+      width = Math.max(1, rect.width);
+      height = Math.max(1, rect.height);
+      dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+      canvas.width = Math.round(width * dpr);
+      canvas.height = Math.round(height * dpr);
+
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+      for (const item of [...words, ...waves]) {
+        item.x *= width / oldWidth;
+        item.y *= height / oldHeight;
+      }
+
+      if (target) {
+        target.x *= width / oldWidth;
+        target.y *= height / oldHeight;
+      }
+    }
+
+    resize();
+
+    if (typeof ResizeObserver === "function") {
+      new ResizeObserver(resize).observe(area);
+    } else {
+      window.addEventListener("resize", resize);
+    }
+
+    function focusInput() {
+      input.focus({ preventScroll: true });
+    }
+
+    function nextPosition() {
+      if (target) {
+        const position = target;
+        target = null;
+        return position;
+      }
+
+      const angle = count++ * 2.39996;
+
+      return {
+        x: width / 2 + Math.cos(angle) * width * 0.2,
+        y: height / 2 + Math.sin(angle) * height * 0.2
+      };
+    }
+
+    function impact(word) {
+      // Limit overlapping waves during rapid typing.
+      if (
+        word.lastWave === undefined ||
+        time - word.lastWave > 0.12
+      ) {
+        waves.push({
+          x: word.x,
+          y: word.y,
+          age: 0,
+          seed: word.seed
+        });
+
+        if (waves.length > 24) waves.shift();
+        word.lastWave = time;
+      }
+
+      // New letters push existing words outward.
+      for (const other of words) {
+        if (other === word) continue;
+
+        let dx = other.x - word.x;
+        let dy = other.y - word.y;
+        let distance = Math.hypot(dx, dy);
+
+        if (distance < 1) {
+          dx = Math.cos(other.seed);
+          dy = Math.sin(other.seed);
+          distance = 1;
+        }
+
+        const force = 135 * Math.exp(-distance / 230);
+
+        other.vx += dx / distance * force;
+        other.vy += dy / distance * force;
+        other.stress = Math.min(1, other.stress + 0.3);
+      }
+    }
+
+    function setWord(text) {
+      text = letters(text).slice(0, 32).join("");
+
+      if (!text) {
+        if (active) {
+          active.age = Math.max(active.age, LIFE * 0.82);
+        }
+
+        active = null;
+        return;
+      }
+
+      if (
+        !active ||
+        !words.includes(active) ||
+        active.age > LIFE * 0.72
+      ) {
+        active = {
+          ...nextPosition(),
+          text,
+          age: 0,
+          radius: 12,
+          vx: 0,
+          vy: 0,
+          stress: 0,
+          seed: Math.random() * TAU
+        };
+
+        words.push(active);
+
+        if (words.length > MAX_WORDS) words.shift();
+      } else {
+        if (active.text === text) return;
+
+        active.text = text;
+        active.age = Math.min(active.age, 1.2);
+      }
+
+      impact(active);
+    }
+
+    function acceptInput() {
+      if (composing) return;
+
+      const parts = input.value.split(/\s+/u);
+
+      if (parts.length === 1) {
+        if (input.value !== (active?.text || "")) {
+          setWord(input.value);
+        }
+
+        return;
+      }
+
+      if (parts[0]) setWord(parts[0]);
+      active = null;
+
+      for (let i = 1; i < parts.length - 1; i++) {
+        if (parts[i]) setWord(parts[i]);
+        active = null;
+      }
+
+      input.value = parts[parts.length - 1];
+
+      if (input.value) setWord(input.value);
+    }
+
+    input.addEventListener("compositionstart", () => {
+      composing = true;
+    });
+
+    input.addEventListener("compositionend", () => {
+      composing = false;
+      acceptInput();
+    });
+
+    input.addEventListener("input", acceptInput);
+
+    input.addEventListener("keydown", event => {
+      if (
+        event.key === "Enter" &&
+        !event.isComposing &&
+        !composing
+      ) {
+        event.preventDefault();
+        acceptInput();
+
+        active = null;
+        input.value = "";
+      }
+    });
+
+    canvas.addEventListener("pointerdown", event => {
+      // Stop the browser from moving focus away after this event.
+      event.preventDefault();
+
+      const rect = canvas.getBoundingClientRect();
+
+      target = {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+      };
+
+      if (!composing) {
+        active = null;
+        input.value = "";
+      }
+
+      focusInput();
+    });
+
+    // Also handle click-based focus on touch devices.
+    canvas.addEventListener("click", focusInput);
+
+    document.addEventListener("keydown", event => {
+      const element = event.target;
+      const isEditing = element instanceof Element &&
+        element.matches(
+          "input, textarea, select, button, [contenteditable]"
+        );
+
+      if (
+        document.activeElement === input ||
+        isEditing ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.altKey
+      ) {
+        return;
+      }
+
+      const startsComposition =
+        event.key === "Process" ||
+        event.key === "Unidentified" ||
+        event.isComposing ||
+        event.keyCode === 229;
+
+      if (startsComposition) {
+        focusInput();
+        return;
+      }
+
+      if (event.key.length === 1) {
+        event.preventDefault();
+        focusInput();
+
+        // Preserve the first character when focus was elsewhere.
+        input.value += event.key;
+        acceptInput();
+      }
+    });
+
+    // Focus on initial load without scrolling the page.
+    focusInput();
+
+    // Store the text on a transparent canvas.
+    // The letter shapes themselves become the oil film.
+    function prepareTexture(word) {
+      const key = `${word.text}|${width}|${dpr}`;
+
+      if (word.textureKey === key) return;
+
+      const texture = document.createElement("canvas");
+      const g = texture.getContext("2d");
+
+      const base = clamp(width * 0.13, 68, FONT_SIZE);
+      const font = size =>
+        `800 ${size}px Arial, "Apple SD Gothic Neo", sans-serif`;
+
+      g.font = font(base);
+
+      const measured = g.measureText(word.text).width;
+
+      const size = base * Math.min(
+        1,
+        width * 0.76 / Math.max(1, measured)
+      );
+
+      g.font = font(size);
+
+      const textWidth = g.measureText(word.text).width;
+
+      texture.width = Math.ceil((textWidth + 48) * dpr);
+      texture.height = Math.ceil((size * 1.65 + 48) * dpr);
+
+      const w = texture.width / dpr;
+      const h = texture.height / dpr;
+
+      g.scale(dpr, dpr);
+      g.font = font(size);
+      g.textAlign = "center";
+      g.textBaseline = "middle";
+
+      const film = g.createLinearGradient(0, 0, w, h);
+
+      [
+        [0, "#b2e3d5"],
+        [0.22, "#deeacb"],
+        [0.4, "#b6a1d6"],
+        [0.57, "#6caaa9"],
+        [0.72, "#ebd7ab"],
+        [0.88, "#c9a6ca"],
+        [1, "#a9d7cb"]
+      ].forEach(([stop, color]) => {
+        film.addColorStop(stop, color);
+      });
+
+      g.fillStyle = film;
+      g.fillText(word.text, w / 2, h / 2);
+
+      g.strokeStyle = "rgba(227,255,244,0.75)";
+      g.lineWidth = 0.8;
+      g.strokeText(word.text, w / 2, h / 2 - 0.6);
+
+      // Keep reflected light inside the letter shapes.
+      g.globalCompositeOperation = "source-atop";
+
+      const sheen = g.createLinearGradient(
+        0,
+        h * 0.25,
+        0,
+        h * 0.75
+      );
+
+      sheen.addColorStop(0, "rgba(255,255,255,0)");
+      sheen.addColorStop(0.42, "rgba(245,255,246,0.55)");
+      sheen.addColorStop(0.5, "rgba(255,255,255,0.08)");
+      sheen.addColorStop(0.8, "rgba(9,30,40,0.4)");
+      sheen.addColorStop(1, "rgba(0,0,0,0)");
+
+      g.fillStyle = sheen;
+      g.fillRect(0, 0, w, h);
+
+      word.texture = texture;
+      word.textureKey = key;
+      word.tw = w;
+      word.th = h;
+      word.padding = Math.ceil(100 + w * 0.12);
+
+      word.warp = document.createElement("canvas");
+      word.warp.width =
+        texture.width + Math.ceil(word.padding * 2 * dpr);
+      word.warp.height = texture.height;
+    }
+
+    function drawWord(word) {
+      prepareTexture(word);
+
+      const progress = word.age / LIFE;
+      const birth = Math.min(1, word.age * 4 + 0.2);
+      const opacity = Math.pow(1 - progress, 1.45) * birth;
+
+      const g = word.warp.getContext("2d");
+
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, word.warp.width / dpr, word.th);
+
+      const amplitude =
+        1.2 + progress * progress * 45 + word.stress * 9;
+
+      // Move horizontal slices independently for liquid distortion.
+      for (let y = 0; y < word.th; y += 2) {
+        const slice = Math.min(2, word.th - y);
+        const phase = y * 0.036 + word.seed;
+
+        const shift = (
+          Math.sin(phase + time * 0.7) +
+          Math.sin(y * 0.073 - time * 0.44 + word.seed) * 0.38
+        ) * amplitude;
+
+        const stretch = 1 +
+          Math.sin(phase * 0.7 - time * 0.3) *
+          (
+            0.008 +
+            progress * progress * 0.14 +
+            word.stress * 0.05
+          );
+
+        g.drawImage(
+          word.texture,
+          0,
+          y * dpr,
+          word.texture.width,
+          slice * dpr,
+          word.padding + shift + (1 - stretch) * word.tw / 2,
+          y,
+          word.tw * stretch,
+          slice + 0.35
+        );
+      }
+
+      ctx.save();
+      ctx.translate(word.x, word.y);
+
+      ctx.rotate(
+        Math.sin(word.seed + time * 0.13) * progress * 0.12
+      );
+
+      ctx.scale(
+        1 + progress * 1.9,
+        1 + progress * 0.9
+      );
+
+      ctx.globalAlpha = opacity;
+      ctx.filter = `blur(${progress * progress * 8}px)`;
+
+      const w = word.warp.width / dpr;
+
+      ctx.drawImage(
+        word.warp,
+        -w / 2,
+        -word.th / 2,
+        w,
+        word.th
+      );
+
+      ctx.restore();
+    }
+
+    function drawWaves(step) {
+      for (const wave of waves) {
+        wave.age += step;
+
+        for (let ring = 0; ring < 3; ring++) {
+          const age = wave.age - ring * 0.24;
+
+          if (age <= 0 || age >= 3.8) continue;
+
+          const radius =
+            10 + 108 * age + 24 * Math.sqrt(age);
+
+          const fade =
+            Math.min(1, age * 7) *
+            Math.pow(1 - age / 3.8, 2) /
+            (1 + ring * 0.55);
+
+          ctx.beginPath();
+
+          for (let i = 0; i <= 96; i++) {
+            const angle = i / 96 * TAU;
+
+            const r = radius +
+              Math.sin(angle * 3 + wave.seed + age) * age * 1.7;
+
+            const x = wave.x + Math.cos(angle) * r;
+            const y = wave.y + Math.sin(angle) * r * 0.88;
+
+            if (i === 0) {
+              ctx.moveTo(x, y);
+            } else {
+              ctx.lineTo(x, y);
+            }
+          }
+
+          ctx.closePath();
+
+          ctx.strokeStyle =
+            `rgba(126,171,174,${fade * 0.065})`;
+
+          ctx.lineWidth = 5 + age * 2;
+          ctx.stroke();
+
+          const sheen = ctx.createLinearGradient(
+            wave.x - radius,
+            wave.y - radius,
+            wave.x + radius,
+            wave.y + radius
+          );
+
+          sheen.addColorStop(
+            0,
+            `rgba(195,226,221,${fade * 0.38})`
+          );
+
+          sheen.addColorStop(
+            0.45,
+            `rgba(148,160,193,${fade * 0.13})`
+          );
+
+          sheen.addColorStop(
+            1,
+            `rgba(186,214,208,${fade * 0.3})`
+          );
+
+          ctx.strokeStyle = sheen;
+          ctx.lineWidth = 0.85;
+          ctx.stroke();
+        }
+      }
+
+      waves = waves.filter(wave => wave.age < 4.3);
+    }
+
+    function animate(now) {
+      const delta = previous
+        ? Math.min((now - previous) / 1000, 0.04)
+        : 0.016;
+
+      previous = now;
+
+      const step = delta * SPEED;
+      time += step;
+
+      ctx.fillStyle = "#000";
+      ctx.fillRect(0, 0, width, height);
+
+      drawWaves(step);
+
+      for (const word of words) {
+        word.age += step;
+
+        const targetRadius =
+          45 +
+          Math.min(letters(word.text).length, 16) * 14 +
+          word.age * 7;
+
+        word.radius +=
+          (targetRadius - word.radius) *
+          (1 - Math.exp(-step * 2.4));
+
+        word.vx *= Math.exp(-step * 2);
+        word.vy *= Math.exp(-step * 2);
+        word.stress *= Math.exp(-step * 0.9);
+
+        word.x += (
+          word.vx +
+          Math.sin(time * 0.3 + word.seed) * 2
+        ) * step;
+
+        word.y += (
+          word.vy +
+          Math.cos(time * 0.22 + word.seed) * 1.6
+        ) * step;
+
+        const marginX = Math.min(35, width * 0.15);
+        const marginY = Math.min(50, height * 0.15);
+
+        word.vx += (
+          clamp(word.x, marginX, width - marginX) - word.x
+        ) * step;
+
+        word.vy += (
+          clamp(word.y, marginY, height - marginY) - word.y
+        ) * step;
+      }
+
+      // Expanding words gently push one another apart.
+      for (let i = 0; i < words.length; i++) {
+        for (let j = i + 1; j < words.length; j++) {
+          const a = words[i];
+          const b = words[j];
+
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const distance = Math.hypot(dx, dy) || 1;
+
+          const overlap =
+            (a.radius + b.radius) * 0.72 - distance;
+
+          if (overlap > 0) {
+            const force =
+              Math.min(overlap, 70) * step * 0.6;
+
+            const ux = dx / distance;
+            const uy = dy / distance;
+
+            a.vx -= ux * force;
+            a.vy -= uy * force;
+            b.vx += ux * force;
+            b.vy += uy * force;
+          }
+        }
+      }
+
+      words = words.filter(word => word.age < LIFE);
+      words.forEach(drawWord);
+
+      requestAnimationFrame(animate);
+    }
+
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
